@@ -1,5 +1,6 @@
 import { Report, FileAnalysis } from '../models/report';
 import { Issue, IssueSeverity, IssueCategory } from '../models/issue';
+import { createLogger } from '../utils/logger';
 
 export interface ReporterOptions {
   showCodeSnippets?: boolean;
@@ -7,10 +8,15 @@ export interface ReporterOptions {
   sortBy?: 'severity' | 'category' | 'file';
   includeScore?: boolean;
   verbose?: boolean;
+  colorOutput?: boolean;
+  outputPath?: string;
 }
+
+export type ReporterFormat = 'console' | 'json' | 'html';
 
 export abstract class BaseReporter {
   protected options: Required<ReporterOptions>;
+  protected reporterLogger = createLogger('Reporter');
 
   constructor(options: Partial<ReporterOptions> = {}) {
     this.options = {
@@ -19,6 +25,8 @@ export abstract class BaseReporter {
       sortBy: 'severity',
       includeScore: true,
       verbose: false,
+      colorOutput: true,
+      outputPath: '',
       ...options
     } as Required<ReporterOptions>;
   }
@@ -26,12 +34,14 @@ export abstract class BaseReporter {
   abstract generate(report: Report): void;
 
   protected getSeverityColor(severity: IssueSeverity): string {
+    if (!this.options.colorOutput) return '';
+    
     switch (severity) {
-      case IssueSeverity.CRITICAL: return '\x1b[41m'; // Fundo vermelho
-      case IssueSeverity.HIGH: return '\x1b[31m';     // Texto vermelho
-      case IssueSeverity.MEDIUM: return '\x1b[33m';   // Texto amarelo
-      case IssueSeverity.LOW: return '\x1b[36m';      // Texto ciano
-      default: return '\x1b[37m';                     // Texto branco
+      case IssueSeverity.CRITICAL: return '\x1b[41m';
+      case IssueSeverity.HIGH: return '\x1b[31m';
+      case IssueSeverity.MEDIUM: return '\x1b[33m';
+      case IssueSeverity.LOW: return '\x1b[36m';
+      default: return '\x1b[37m';
     }
   }
 
@@ -78,19 +88,23 @@ export abstract class BaseReporter {
   }
 
   protected getScoreColor(score: number): string {
-    if (score >= 90) return '\x1b[32m'; // Verde
-    if (score >= 75) return '\x1b[33m'; // Amarelo
-    if (score >= 50) return '\x1b[35m'; // Magenta
-    return '\x1b[31m';                  // Vermelho
+    if (!this.options.colorOutput) return '';
+    
+    if (score >= 90) return '\x1b[32m';
+    if (score >= 75) return '\x1b[33m';
+    if (score >= 50) return '\x1b[35m';
+    return '\x1b[31m';
   }
 
   protected reset(): string {
-    return '\x1b[0m';
+    return this.options.colorOutput ? '\x1b[0m' : '';
   }
 }
 
 export class ConsoleReporter extends BaseReporter {
   generate(report: Report): void {
+    this.reporterLogger.info('Gerando relatório para console');
+    
     console.log('\n' + '='.repeat(70));
     console.log('🔍 REVISOR DE CÓDIGO - RELATÓRIO DE ANÁLISE');
     console.log('='.repeat(70));
@@ -107,6 +121,11 @@ export class ConsoleReporter extends BaseReporter {
     }
 
     this.printFooter(report);
+    
+    this.reporterLogger.debug('Relatório gerado com sucesso', {
+      totalFiles: report.summary.totalFiles,
+      totalIssues: report.summary.totalIssues
+    });
   }
 
   private printSummary(report: Report): void {
@@ -135,24 +154,31 @@ export class ConsoleReporter extends BaseReporter {
       const icon = this.getCategoryIcon(category.category);
       const categoryName = this.getCategoryName(category.category);
       const total = category.count;
-      const critical = category.severity[IssueSeverity.CRITICAL];
-      const high = category.severity[IssueSeverity.HIGH];
-      const medium = category.severity[IssueSeverity.MEDIUM];
-      const low = category.severity[IssueSeverity.LOW];
+      const severityData = category.severity;
       
-      console.log(`${icon} ${categoryName}: ${total} problemas`);
+      console.log(`${icon} ${categoryName}: ${total} problema${total > 1 ? 's' : ''}`);
       
-      if (critical > 0) console.log(`  ${'🔴'.repeat(Math.min(critical, 10))} Crítico: ${critical}`);
-      if (high > 0) console.log(`  ${'🟠'.repeat(Math.min(high, 10))} Alto: ${high}`);
-      if (medium > 0) console.log(`  ${'🟡'.repeat(Math.min(medium, 10))} Médio: ${medium}`);
-      if (low > 0) console.log(`  ${'🔵'.repeat(Math.min(low, 10))} Baixo: ${low}`);
+      const severityEntries = [
+        { key: IssueSeverity.CRITICAL, icon: '🔴', label: 'Crítico' },
+        { key: IssueSeverity.HIGH, icon: '🟠', label: 'Alto' },
+        { key: IssueSeverity.MEDIUM, icon: '🟡', label: 'Médio' },
+        { key: IssueSeverity.LOW, icon: '🔵', label: 'Baixo' }
+      ];
+
+      severityEntries.forEach(({ key, icon, label }) => {
+        const count = severityData[key];
+        if (count > 0) {
+          const iconRepeat = icon.repeat(Math.min(count, 10));
+          console.log(`  ${iconRepeat} ${label}: ${count}`);
+        }
+      });
       console.log('');
     });
   }
 
   private printFileAnalysis(report: Report): void {
     const sortedFiles = this.sortFilesByIssues(report.files);
-    const filesToShow = sortedFiles.slice(0, 5); // Mostrar top 5 arquivos com mais problemas
+    const filesToShow = sortedFiles.slice(0, 5);
     
     if (filesToShow.some(f => f.issues.length > 0)) {
       console.log('\n🗂️  ARQUIVOS COM MAIS PROBLEMAS');
@@ -174,7 +200,7 @@ export class ConsoleReporter extends BaseReporter {
         });
         
         if (file.issues.length > this.options.maxIssuesPerFile) {
-          console.log(`   ... e mais ${file.issues.length - this.options.maxIssuesPerFile} problemas`);
+          console.log(`   💭 ... e mais ${file.issues.length - this.options.maxIssuesPerFile} problema${file.issues.length - this.options.maxIssuesPerFile > 1 ? 's' : ''}`);
         }
       });
     }
@@ -219,15 +245,18 @@ export class ConsoleReporter extends BaseReporter {
     } else {
       console.log('💡 Foque nos problemas críticos e de alta severidade primeiro.');
       console.log('📚 Cada problema inclui sugestões para melhoria.');
+      
+      if (report.summary.overallScore < 70) {
+        console.log('⚠️  Considere refatorar arquivos com pontuação baixa.');
+      }
     }
     
-    console.log('🔧 Revisor de Código - Melhorando seu código, um problema por vez!');
+    console.log('🔧 Revisor de Código v1.1.0 - Melhorando seu código, um problema por vez!');
     console.log('='.repeat(70) + '\n');
   }
 
   private sortFilesByIssues(files: FileAnalysis[]): FileAnalysis[] {
     return [...files].sort((a, b) => {
-      // Ordenar por quantidade de problemas (decrescente), depois por pontuação (crescente)
       if (a.issues.length !== b.issues.length) {
         return b.issues.length - a.issues.length;
       }
@@ -251,3 +280,72 @@ export class ConsoleReporter extends BaseReporter {
       .join('\n');
   }
 }
+
+export class JSONReporter extends BaseReporter {
+  generate(report: Report): void {
+    this.reporterLogger.info('Gerando relatório JSON');
+    
+    const jsonReport = {
+      summary: report.summary,
+      categories: report.categories,
+      files: report.files.map(file => ({
+        ...file,
+        issues: file.issues.map(issue => ({
+          ...issue,
+          codeSnippet: this.options.showCodeSnippets ? issue.codeSnippet : undefined
+        }))
+      })),
+      topIssues: report.topIssues.slice(0, 10),
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        version: '1.1.0',
+        format: 'json'
+      }
+    };
+
+    console.log(JSON.stringify(jsonReport, null, 2));
+    
+    this.reporterLogger.debug('Relatório JSON gerado');
+  }
+}
+
+// Factory function para criar reporters
+export function createReporter(format: ReporterFormat, options: Partial<ReporterOptions> = {}): BaseReporter {
+  const reporterLogger = createLogger('ReporterFactory');
+  
+  try {
+    switch (format) {
+      case 'console':
+        reporterLogger.debug('Criando ConsoleReporter');
+        return new ConsoleReporter(options);
+        
+      case 'json':
+        reporterLogger.debug('Criando JSONReporter');
+        return new JSONReporter(options);
+        
+      case 'html':
+        reporterLogger.debug('Criando HTMLReporter');
+        const { HTMLReporter } = require('./html-reporter');
+        return new HTMLReporter(options);
+        
+      default:
+        reporterLogger.warn('Formato de reporter não reconhecido, usando console', { format });
+        return new ConsoleReporter(options);
+    }
+  } catch (error) {
+    reporterLogger.error('Erro ao criar reporter', error as Error, { format, options });
+    reporterLogger.info('Fallback para ConsoleReporter');
+    return new ConsoleReporter(options);
+  }
+}
+
+export function getAvailableFormats(): ReporterFormat[] {
+  return ['console', 'json', 'html'];
+}
+
+export function validateReporterFormat(format: string): format is ReporterFormat {
+  return getAvailableFormats().includes(format as ReporterFormat);
+}
+
+// Re-export para compatibilidade
+export { HTMLReporter } from './html-reporter';
